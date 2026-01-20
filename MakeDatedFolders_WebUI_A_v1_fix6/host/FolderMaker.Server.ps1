@@ -102,22 +102,28 @@ foreach ($p in $portsToTry) {
 if (-not $listener) { throw 'ポートを開けませんでした。別のポートを指定してください。' }
 $uiRoot = Join-Path $root 'ui'
 $script:lastPing = Get-Date
+$script:lastPingLogAt = $null
 $script:listenerRef = $listener
 $script:closeRequestedAt = $null
 $script:shutdownRequested = $false
+$script:ActiveRequests = 0
 $script:timerRef = $null
 $timer = $null
 if (-not $NoOpenBrowser) {
-  $script:AutoShutdownSeconds = 5
-  $script:CloseGraceSeconds = 6
+  $script:AutoShutdownSeconds = 120
+  $script:CloseGraceSeconds = 30
   $timer = New-Object System.Timers.Timer
   $timer.Interval = 3000
   $timer.AutoReset = $true
   $timer.add_Elapsed({
+    if ($script:ActiveRequests -gt 0) {
+      return
+    }
     $closeAt = $script:closeRequestedAt
     if ($null -ne $closeAt) {
       $closeDelta = (New-TimeSpan -Start $closeAt -End (Get-Date)).TotalSeconds
       if ($closeDelta -ge $script:CloseGraceSeconds) {
+        Write-Host '[FolderMaker] close requested -> stopping server'
         try { $script:listenerRef.Stop() } catch {}
         try { $script:listenerRef.Close() } catch {}
         try { $this.Stop() } catch {}
@@ -128,6 +134,7 @@ if (-not $NoOpenBrowser) {
     if ($null -ne $last) {
       $delta = (New-TimeSpan -Start $last -End (Get-Date)).TotalSeconds
       if ($delta -ge $script:AutoShutdownSeconds) {
+        Write-Host ('[FolderMaker] auto-shutdown: idle {0:N1}s' -f $delta)
         try { $script:listenerRef.Stop() } catch {}
         try { $script:listenerRef.Close() } catch {}
         try { $this.Stop() } catch {}
@@ -171,30 +178,39 @@ while ($listener.IsListening) {
   try { $ctx = $listener.GetContext() } catch { break }
   $req = $ctx.Request
   $res = $ctx.Response
+  $script:lastPing = Get-Date
   try {
     $path = $req.Url.AbsolutePath
+    if ($path -eq '/favicon.ico') {
+      Write-Bytes $res ([byte[]]@()) 'image/x-icon' 204
+      continue
+    }
     if ($path -eq '/api/health' -and $req.HttpMethod -eq 'GET') { Write-Json $res @{ok=$true;ts=(Get-Date).ToString('s')} ; continue }
     if ($path -eq '/api/ping' -and $req.HttpMethod -eq 'POST') {
       $script:lastPing = Get-Date
+      if ($null -eq $script:lastPingLogAt -or (New-TimeSpan -Start $script:lastPingLogAt -End $script:lastPing).TotalSeconds -ge 30) {
+        Write-Host '[FolderMaker] ping'
+        $script:lastPingLogAt = $script:lastPing
+      }
       Write-Json $res @{ ok = $true } 200
       continue
     }
     if ($path -eq '/api/close' -and $req.HttpMethod -eq 'POST') {
       # UI ウィンドウが閉じられたらサーバも終了 → Start.bat の PowerShell ホストも閉じる
       $script:closeRequestedAt = Get-Date
+      Write-Host '[FolderMaker] close requested'
       Write-Json $res @{ ok = $true } 200
       continue
     }
     if ($path -eq '/api/shutdown' -and $req.HttpMethod -eq 'POST') {
       $script:closeRequestedAt = Get-Date
       $script:shutdownRequested = $true
+      Write-Host '[FolderMaker] shutdown requested'
       Write-Json $res @{ ok = $true } 200
-      [System.Threading.ThreadPool]::QueueUserWorkItem({
-        Start-Sleep -Milliseconds 200
+      if (-not $script:timerRef) {
         try { $script:listenerRef.Stop() } catch {}
         try { $script:listenerRef.Close() } catch {}
-        try { if ($script:timerRef) { $script:timerRef.Stop() } } catch {}
-      }) | Out-Null
+      }
       continue
     }
     if ($path -eq '/api/config/basePath' -and $req.HttpMethod -eq 'POST') {
@@ -268,50 +284,62 @@ while ($listener.IsListening) {
       }
     }
     if (($path -eq '/api/preview' -or $path -eq '/api/run') -and $req.HttpMethod -eq 'POST') {
-      $bodyText = Read-RequestBody $req
-      $payload = $null
-      try { $payload = $bodyText | ConvertFrom-Json } catch { Write-Json $res @{ok=$false;errors=@('JSONが不正です');raw=$bodyText} 400; continue }
-      $basePath = [string]$payload.basePath
-      $mode = [string]$payload.mode
-      $foldersPerDay = [int]$payload.foldersPerDay
-      $firstDayStartIndex = [int]$payload.firstDayStartIndex
-      $startDate = [datetime]$payload.startDate
-      $endDate = $null
-      if ($mode -eq 'Range') { $endDate = [datetime]$payload.endDate } else { $daysToMake = [int]$payload.daysToMake; $endDate = $startDate.Date.AddDays($daysToMake-1) }
-      $errors = New-Object System.Collections.Generic.List[string]
-      if (-not $basePath) { $errors.Add('作成先パスが空です') }
-      if ($foldersPerDay -lt 1) { $errors.Add('最大番号は1以上にしてください') }
-      if ($firstDayStartIndex -lt 1) { $errors.Add('初日の開始番号は1以上にしてください') }
-      if ($mode -ne 'Range' -and $mode -ne 'Days') { $errors.Add('mode は Range / Days のどちらかです') }
-      if ($mode -eq 'Days' -and $daysToMake -lt 1) { $errors.Add('日数は1以上にしてください') }
-      if ($endDate.Date -lt $startDate.Date) { $errors.Add('終了日は開始日以降にしてください') }
-      if (-not (Test-Path -LiteralPath $basePath)) { $errors.Add(('作成先パスが存在しません: {0}' -f $basePath)) }
-      if ($errors.Count -gt 0) { Write-Json $res @{ok=$false;errors=$errors} 400; continue }
-      if ($path -eq '/api/preview') {
-        $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex
-        $days = ($endDate.Date - $startDate.Date).Days + 1
-	      # NOTE: PowerShell は 1件だけヒットすると配列ではなくスカラーになるため、@() で必ず配列化して .Count を安全に取る
-	      $summary = @{
-	        days  = $days
-	        total = @($plan).Count
-	        create = @($plan | Where-Object { $_.Action -eq 'Create' }).Count
-	        skip   = @($plan | Where-Object { $_.Action -eq 'Skip'   }).Count
-	        start = $startDate.ToString('yyyy-MM-dd')
-	        end   = $endDate.ToString('yyyy-MM-dd')
-	      }
-        $items = foreach ($item in @($plan)) { Convert-PlanItem $item }
-        Write-Json $res @{ok=$true; summary=$summary; items=$items }
-        continue
-      } else {
-        $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -Confirm:$false
-        $items = foreach ($item in @($result)) { Convert-RunItem $item }
-	      Write-Json $res @{
-	        ok = $true
-	        created = @($result | Where-Object { $_.Result -match '^Created' }).Count
-	        skipped = @($result | Where-Object { $_.Result -match '^Skipped' }).Count
-	        items = $items
-	      }
-        continue
+      $opName = if ($path -eq '/api/preview') { 'preview' } else { 'run' }
+      $script:ActiveRequests += 1
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      try {
+        $bodyText = Read-RequestBody $req
+        $payload = $null
+        try { $payload = $bodyText | ConvertFrom-Json } catch { Write-Json $res @{ok=$false;errors=@('JSONが不正です');raw=$bodyText} 400; continue }
+        $basePath = [string]$payload.basePath
+        $mode = [string]$payload.mode
+        $foldersPerDay = [int]$payload.foldersPerDay
+        $firstDayStartIndex = [int]$payload.firstDayStartIndex
+        $startDate = [datetime]$payload.startDate
+        $endDate = $null
+        if ($mode -eq 'Range') { $endDate = [datetime]$payload.endDate } else { $daysToMake = [int]$payload.daysToMake; $endDate = $startDate.Date.AddDays($daysToMake-1) }
+        $errors = New-Object System.Collections.Generic.List[string]
+        if (-not $basePath) { $errors.Add('作成先パスが空です') }
+        if ($foldersPerDay -lt 1) { $errors.Add('最大番号は1以上にしてください') }
+        if ($firstDayStartIndex -lt 1) { $errors.Add('初日の開始番号は1以上にしてください') }
+        if ($mode -ne 'Range' -and $mode -ne 'Days') { $errors.Add('mode は Range / Days のどちらかです') }
+        if ($mode -eq 'Days' -and $daysToMake -lt 1) { $errors.Add('日数は1以上にしてください') }
+        if ($endDate.Date -lt $startDate.Date) { $errors.Add('終了日は開始日以降にしてください') }
+        if (-not (Test-Path -LiteralPath $basePath)) { $errors.Add(('作成先パスが存在しません: {0}' -f $basePath)) }
+        if ($errors.Count -gt 0) { Write-Json $res @{ok=$false;errors=$errors} 400; continue }
+        if ($path -eq '/api/preview') {
+          Write-Host ('[FolderMaker] preview start: {0}' -f $basePath)
+          $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex
+          $days = ($endDate.Date - $startDate.Date).Days + 1
+	        # NOTE: PowerShell は 1件だけヒットすると配列ではなくスカラーになるため、@() で必ず配列化して .Count を安全に取る
+	        $summary = @{
+	          days  = $days
+	          total = @($plan).Count
+	          create = @($plan | Where-Object { $_.Action -eq 'Create' }).Count
+	          skip   = @($plan | Where-Object { $_.Action -eq 'Skip'   }).Count
+	          start = $startDate.ToString('yyyy-MM-dd')
+	          end   = $endDate.ToString('yyyy-MM-dd')
+	        }
+          $items = foreach ($item in @($plan)) { Convert-PlanItem $item }
+          Write-Json $res @{ok=$true; summary=$summary; items=$items }
+          continue
+        } else {
+          Write-Host ('[FolderMaker] run start: {0}' -f $basePath)
+          $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -Confirm:$false
+          $items = foreach ($item in @($result)) { Convert-RunItem $item }
+	        Write-Json $res @{
+	          ok = $true
+	          created = @($result | Where-Object { $_.Result -match '^Created' }).Count
+	          skipped = @($result | Where-Object { $_.Result -match '^Skipped' }).Count
+	          items = $items
+	        }
+          continue
+        }
+      } finally {
+        $sw.Stop()
+        $script:ActiveRequests = [Math]::Max(0, ($script:ActiveRequests - 1))
+        $script:lastPing = Get-Date
+        Write-Host ('[FolderMaker] {0} end ({1:N1}s, active={2})' -f $opName, $sw.Elapsed.TotalSeconds, $script:ActiveRequests)
       }
     }
     # static files

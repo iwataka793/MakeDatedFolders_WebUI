@@ -432,7 +432,7 @@ function Get-ExistingIndicesForDate {
     }
 
     try {
-        $names = Get-ChildItem -LiteralPath $BasePath -Directory -Name -ErrorAction Stop
+        $names = Get-ChildItem -LiteralPath $BasePath -Directory -Name -Filter "$DateString-*" -ErrorAction Stop
         foreach ($n in $names) {
             if ($n -match $pattern) {
                 $parts = $n -split '-'

@@ -1,10 +1,7 @@
 const $ = (id)=>document.getElementById(id);
 const state = { mode: 'Range', lastItems: [] };
-let _autoTimer = null;
-let _closeRequested = false;
-let _reloadRequested = false;
 let _shutdownRequested = false;
-const _skipCloseKey = 'skipCloseOnce';
+let _previewController = null;
 
 function iso(d){ return d.toISOString().slice(0,10); }
 
@@ -14,7 +11,6 @@ function setMode(mode){
   $('modeDays').classList.toggle('active', mode==='Days');
   $('endWrap').classList.toggle('hidden', mode==='Days');
   $('daysWrap').classList.toggle('hidden', mode!=='Days');
-  scheduleAutoPreview();
 }
 
 function setStatus(t){
@@ -71,26 +67,13 @@ function payload(){
   return { basePath, mode: state.mode, startDate, endDate, daysToMake, foldersPerDay, firstDayStartIndex };
 }
 
-function canAutoPreview(){
-  const p = payload();
-  if(!p.basePath) return false;
-  if(!p.startDate) return false;
-  if(p.mode==='Range' && !p.endDate) return false;
-  if(p.mode==='Days' && (!Number.isFinite(p.daysToMake) || p.daysToMake<1)) return false;
-  if(!Number.isFinite(p.foldersPerDay) || p.foldersPerDay<1) return false;
-  if(!Number.isFinite(p.firstDayStartIndex) || p.firstDayStartIndex<1) return false;
-  return true;
-}
-
-function scheduleAutoPreview(){
-  clearTimeout(_autoTimer);
-  _autoTimer = setTimeout(()=>{
-    if(canAutoPreview()) onPreview();
-  }, 450);
-}
-
-async function api(path, body){
-  const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json; charset=utf-8'}, body: JSON.stringify(body) });
+async function api(path, body, options = {}){
+  const res = await fetch(path, {
+    method:'POST',
+    headers:{'Content-Type':'application/json; charset=utf-8'},
+    body: JSON.stringify(body),
+    signal: options.signal
+  });
   const j = await res.json().catch(()=>({ok:false, errors:['invalid json response']}));
   if(!res.ok || !j.ok){ throw new Error((j.errors && j.errors[0]) || `HTTP ${res.status}`); }
   return j;
@@ -104,7 +87,6 @@ async function loadConfig(){
       setCfgPath(j.configPath);
       if(j.config && j.config.DefaultBasePath && !$('basePath').value){ $('basePath').value = j.config.DefaultBasePath; }
       setStatus('config loaded');
-      scheduleAutoPreview();
     } else {
       setStatus('config load failed');
     }
@@ -121,16 +103,33 @@ async function health(){
 }
 
 async function onPreview(){
+  if(_previewController){
+    setStatus('preview is already running');
+    return;
+  }
+  const previewButton = $('btnPreview');
+  previewButton.disabled = true;
+  const controller = new AbortController();
+  _previewController = controller;
+  const timeoutId = setTimeout(()=>controller.abort(), 60000);
   setStatus('preview...');
   try{
-    const j = await api('/api/preview', payload());
+    const j = await api('/api/preview', payload(), { signal: controller.signal });
     updateSummary(j.summary);
     render(j.items);
     setStatus('preview ready');
   } catch(e){
     updateSummary(null);
     render([]);
-    setStatus('error: ' + e.message);
+    if(e.name === 'AbortError'){
+      setStatus('preview canceled (timeout)');
+    } else {
+      setStatus('error: ' + e.message);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+    _previewController = null;
+    previewButton.disabled = false;
   }
 }
 
@@ -163,7 +162,6 @@ async function onBrowse(){
     }
     if(j.path){ $('basePath').value = j.path; }
     setStatus('folder selected');
-    scheduleAutoPreview();
   } catch(e){
     setStatus('error: ' + e.message);
   }
@@ -191,39 +189,9 @@ async function keepAlive(){
   } catch(e){}
 }
 
-function shouldSkipClose(){
-  try{
-    if (sessionStorage.getItem(_skipCloseKey)){
-      sessionStorage.removeItem(_skipCloseKey);
-      return true;
-    }
-  } catch(e){}
-  return false;
-}
-
-function requestClose(){
-  if (_closeRequested || _reloadRequested || shouldSkipClose()) { return; }
-  _closeRequested = true;
-  try{
-    const payload = JSON.stringify({ ts: new Date().toISOString() });
-    if (navigator.sendBeacon){
-      const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon('/api/close', blob);
-    } else {
-      fetch('/api/close', {
-        method:'POST',
-        headers:{'Content-Type':'application/json; charset=utf-8'},
-        body: payload,
-        keepalive: true
-      });
-    }
-  } catch(e){}
-}
-
 async function requestShutdown(){
   if (_shutdownRequested) { return; }
   _shutdownRequested = true;
-  _closeRequested = true;
   try{
     const payload = JSON.stringify({ ts: new Date().toISOString() });
     await fetch('/api/shutdown', {
@@ -268,18 +236,9 @@ function init(){
   $('btnBrowse').addEventListener('click', onBrowse);
   $('btnSaveBase').addEventListener('click', onSaveBase);
   $('btnReload').addEventListener('click', ()=>{
-    _reloadRequested = true;
-    try { sessionStorage.setItem(_skipCloseKey, '1'); } catch(e){}
     location.reload();
   });
   $('btnShutdown').addEventListener('click', requestShutdown);
-
-  // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
-  for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
-    const el = $(id);
-    el.addEventListener('input', scheduleAutoPreview);
-    el.addEventListener('change', scheduleAutoPreview);
-  }
 
   wireDatePicker('startDate', 'startDateBtn');
   wireDatePicker('endDate', 'endDateBtn');
@@ -289,8 +248,6 @@ function init(){
   keepAlive();
   setInterval(health, 5000);
   setInterval(keepAlive, 5000);
-  window.addEventListener('beforeunload', requestClose);
-  window.addEventListener('pagehide', requestClose);
 
 }
 
