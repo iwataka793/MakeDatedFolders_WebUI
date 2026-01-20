@@ -3,6 +3,7 @@ const state = { mode: 'Range', lastItems: [] };
 let _autoTimer = null;
 let _closeRequested = false;
 let _reloadRequested = false;
+let _shutdownRequested = false;
 const _skipCloseKey = 'skipCloseOnce';
 
 function iso(d){ return d.toISOString().slice(0,10); }
@@ -220,6 +221,23 @@ function requestClose(){
   } catch(e){}
 }
 
+async function requestShutdown(){
+  if (_shutdownRequested) { return; }
+  if (!confirm('サーバーを終了します。よろしいですか？')) { return; }
+  _shutdownRequested = true;
+  _closeRequested = true;
+  try{
+    const payload = JSON.stringify({ ts: new Date().toISOString() });
+    await fetch('/api/shutdown', {
+      method:'POST',
+      headers:{'Content-Type':'application/json; charset=utf-8'},
+      body: payload,
+      keepalive: true
+    });
+  } catch(e){}
+  try { window.close(); } catch(e){}
+}
+
 function wireDatePicker(inputId, buttonId){
   const input = $(inputId);
   const btn = $(buttonId);
@@ -256,6 +274,7 @@ function init(){
     try { sessionStorage.setItem(_skipCloseKey, '1'); } catch(e){}
     location.reload();
   });
+  $('btnShutdown').addEventListener('click', requestShutdown);
 
   // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
   for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
