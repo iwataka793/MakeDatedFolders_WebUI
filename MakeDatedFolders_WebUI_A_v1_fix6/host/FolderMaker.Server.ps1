@@ -173,9 +173,6 @@ while ($listener.IsListening) {
     if ($path -eq '/api/health' -and $req.HttpMethod -eq 'GET') { Write-Json $res @{ok=$true;ts=(Get-Date).ToString('s')} ; continue }
     if ($path -eq '/api/ping' -and $req.HttpMethod -eq 'POST') {
       $script:lastPing = Get-Date
-      if ($script:closeRequestedAt -and $script:lastPing -gt $script:closeRequestedAt) {
-        $script:closeRequestedAt = $null
-      }
       Write-Json $res @{ ok = $true } 200
       continue
     }

@@ -2,6 +2,7 @@ const $ = (id)=>document.getElementById(id);
 const state = { mode: 'Range', lastItems: [] };
 let _autoTimer = null;
 let _closeRequested = false;
+let _reloadRequested = false;
 const _skipCloseKey = 'skipCloseOnce';
 
 function iso(d){ return d.toISOString().slice(0,10); }
@@ -201,7 +202,7 @@ function shouldSkipClose(){
 }
 
 function requestClose(){
-  if (_closeRequested || shouldSkipClose()) { return; }
+  if (_closeRequested || _reloadRequested || shouldSkipClose()) { return; }
   _closeRequested = true;
   try{
     const payload = JSON.stringify({ ts: new Date().toISOString() });
@@ -251,6 +252,7 @@ function init(){
   $('btnBrowse').addEventListener('click', onBrowse);
   $('btnSaveBase').addEventListener('click', onSaveBase);
   $('btnReload').addEventListener('click', ()=>{
+    _reloadRequested = true;
     try { sessionStorage.setItem(_skipCloseKey, '1'); } catch(e){}
     location.reload();
   });
