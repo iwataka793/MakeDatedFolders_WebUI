@@ -46,13 +46,12 @@ function render(items){
     const action = it.Action || (String(it.Result || '').startsWith('Created') ? 'Create' : (String(it.Result || '').startsWith('Skipped') ? 'Skip' : ''));
     const kind = it.Kind || (String(it.Result || '').includes('Year') ? 'Year' : (String(it.Result || '').includes('Month') ? 'Month' : 'Day'));
     const fullPath = it.FullPath ?? '';
-    const openLink = fullPath ? `<a href="#" class="openlink" data-path="${encodeURIComponent(fullPath)}">開く</a>` : '';
     tr.innerHTML = `
       <td class="kind">${kind || ''}</td>
       <td>${d}</td>
       <td>${it.FolderName ?? ''}</td>
       <td>${badge(action)}</td>
-      <td class="path">${fullPath} ${openLink}</td>
+      <td class="path">${fullPath}</td>
     `;
     tb.appendChild(tr);
   }
@@ -81,8 +80,6 @@ function canAutoPreview(){
 
 function scheduleAutoPreview(){
   clearTimeout(_autoTimer);
-  // BasePath が入ったら「作成先を開く」を有効化
-  $('btnOpenBase').disabled = !($('basePath').value || '').trim();
   _autoTimer = setTimeout(()=>{
     if(canAutoPreview()) onPreview();
   }, 450);
@@ -143,19 +140,6 @@ async function onRun(){
     setStatus(`done (created: ${created}, skipped: ${skipped})`);
     updateSummary({ days: '-', total: created + skipped, create: created, skip: skipped });
     render(j.items);
-    // 作成先フォルダへ移動（任意）
-    $('btnOpenBase').disabled = !($('basePath').value || '').trim();
-  } catch(e){
-    setStatus('error: ' + e.message);
-  }
-}
-
-async function onOpenBase(){
-  const basePath = ($('basePath').value || '').trim();
-  if(!basePath){ setStatus('error: base path is empty'); return; }
-  try{
-    await api('/api/openFolder', { path: basePath });
-    setStatus('opened');
   } catch(e){
     setStatus('error: ' + e.message);
   }
@@ -204,20 +188,6 @@ async function keepAlive(){
   } catch(e){}
 }
 
-let _closeSent = false;
-function closeServer(){
-  if(_closeSent) return;
-  _closeSent = true;
-  try{
-    const blob = new Blob(['{}'], { type: 'application/json; charset=utf-8' });
-    if(navigator.sendBeacon){
-      navigator.sendBeacon('/api/close', blob);
-    } else {
-      fetch('/api/close', { method:'POST', headers:{'Content-Type':'application/json; charset=utf-8'}, body:'{}', keepalive:true }).catch(()=>{});
-    }
-  } catch(e){}
-}
-
 function wireDatePicker(inputId, buttonId){
   const input = $(inputId);
   const btn = $(buttonId);
@@ -243,27 +213,13 @@ function init(){
   $('endDate').value = iso(end);
   setMode('Range');
 
-  // 初期状態: BasePath が空なら「作成先を開く」は無効
-  $('btnOpenBase').disabled = !($('basePath').value || '').trim();
-
   $('modeRange').addEventListener('click', ()=>setMode('Range'));
   $('modeDays').addEventListener('click', ()=>setMode('Days'));
   $('btnPreview').addEventListener('click', onPreview);
   $('btnRun').addEventListener('click', onRun);
   $('btnBrowse').addEventListener('click', onBrowse);
   $('btnSaveBase').addEventListener('click', onSaveBase);
-  $('btnOpenBase').addEventListener('click', onOpenBase);
   $('btnReload').addEventListener('click', ()=>location.reload());
-
-  // 結果テーブルの「開く」リンク
-  $('resultTable').addEventListener('click', (e)=>{
-    const a = e.target && e.target.closest ? e.target.closest('a.openlink') : null;
-    if(!a) return;
-    e.preventDefault();
-    const p = decodeURIComponent(a.getAttribute('data-path') || '');
-    if(!p) return;
-    api('/api/openFolder', { path: p }).catch(err=>setStatus('error: ' + err.message));
-  });
 
   // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
   for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
@@ -281,9 +237,6 @@ function init(){
   setInterval(health, 5000);
   setInterval(keepAlive, 5000);
 
-  // ウィンドウを閉じたらサーバも終了（コンソールを自動で閉じるため）
-  window.addEventListener('pagehide', closeServer);
-  window.addEventListener('beforeunload', closeServer);
 }
 
 init();

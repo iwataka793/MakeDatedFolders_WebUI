@@ -88,28 +88,6 @@ function Convert-RunItem($item){
   }
 }
 
-function Normalize-FsPath([string]$p){
-  if (-not $p) { return '' }
-  # JSON/URL 由来で " などが混ざることがあるので一度トリム
-  return ([string]$p).Trim()
-}
-
-function Open-InExplorer([string]$path){
-  $p = Normalize-FsPath $path
-  if (-not $p) { throw 'path is empty' }
-  # 末尾の \ を許容
-  $p = $p.TrimEnd()
-  if (Test-Path -LiteralPath $p -PathType Container) {
-    Start-Process -FilePath 'explorer.exe' -ArgumentList @("$p") | Out-Null
-    return
-  }
-  if (Test-Path -LiteralPath $p -PathType Leaf) {
-    # ファイルの場合は選択表示
-    Start-Process -FilePath 'explorer.exe' -ArgumentList @('/select,', "$p") | Out-Null
-    return
-  }
-  throw ('path not found: {0}' -f $p)
-}
 if ($Port -le 0) {
   $portsToTry = 8787..8797
 } else {
@@ -191,19 +169,6 @@ while ($listener.IsListening) {
       Write-Json $res @{ ok = $true } 200
       try { $script:listenerRef.Stop() } catch {}
       try { $script:listenerRef.Close() } catch {}
-      continue
-    }
-    if ($path -eq '/api/openFolder' -and $req.HttpMethod -eq 'POST') {
-      $bodyText = Read-RequestBody $req
-      $payload = $null
-      try { $payload = $bodyText | ConvertFrom-Json } catch { $payload = $null }
-      $p = if ($payload -and $payload.path) { [string]$payload.path } else { '' }
-      try {
-        Open-InExplorer -path $p
-        Write-Json $res @{ ok = $true } 200
-      } catch {
-        Write-Json $res @{ ok = $false; errors = @($_.Exception.Message) } 400
-      }
       continue
     }
     if ($path -eq '/api/config/basePath' -and $req.HttpMethod -eq 'POST') {
