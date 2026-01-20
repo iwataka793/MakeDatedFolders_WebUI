@@ -135,7 +135,6 @@ async function onPreview(){
 }
 
 async function onRun(){
-  if(!confirm('フォルダを作成します。よろしいですか？')) return;
   setStatus('running...');
   try{
     const j = await api('/api/run', payload());
@@ -223,7 +222,6 @@ function requestClose(){
 
 async function requestShutdown(){
   if (_shutdownRequested) { return; }
-  if (!confirm('サーバーを終了します。よろしいですか？')) { return; }
   _shutdownRequested = true;
   _closeRequested = true;
   try{
