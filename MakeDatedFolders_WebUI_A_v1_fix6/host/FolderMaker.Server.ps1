@@ -103,13 +103,25 @@ if (-not $listener) { throw 'ポートを開けませんでした。別のポー
 $uiRoot = Join-Path $root 'ui'
 $script:lastPing = Get-Date
 $script:listenerRef = $listener
+$script:closeRequestedAt = $null
 $timer = $null
 if (-not $NoOpenBrowser) {
   $script:AutoShutdownSeconds = 5
+  $script:CloseGraceSeconds = 6
   $timer = New-Object System.Timers.Timer
   $timer.Interval = 3000
   $timer.AutoReset = $true
   $timer.add_Elapsed({
+    $closeAt = $script:closeRequestedAt
+    if ($null -ne $closeAt) {
+      $closeDelta = (New-TimeSpan -Start $closeAt -End (Get-Date)).TotalSeconds
+      if ($closeDelta -ge $script:CloseGraceSeconds) {
+        try { $script:listenerRef.Stop() } catch {}
+        try { $script:listenerRef.Close() } catch {}
+        try { $this.Stop() } catch {}
+      }
+      return
+    }
     $last = $script:lastPing
     if ($null -ne $last) {
       $delta = (New-TimeSpan -Start $last -End (Get-Date)).TotalSeconds
@@ -161,14 +173,16 @@ while ($listener.IsListening) {
     if ($path -eq '/api/health' -and $req.HttpMethod -eq 'GET') { Write-Json $res @{ok=$true;ts=(Get-Date).ToString('s')} ; continue }
     if ($path -eq '/api/ping' -and $req.HttpMethod -eq 'POST') {
       $script:lastPing = Get-Date
+      if ($script:closeRequestedAt -and $script:lastPing -gt $script:closeRequestedAt) {
+        $script:closeRequestedAt = $null
+      }
       Write-Json $res @{ ok = $true } 200
       continue
     }
     if ($path -eq '/api/close' -and $req.HttpMethod -eq 'POST') {
       # UI ウィンドウが閉じられたらサーバも終了 → Start.bat の PowerShell ホストも閉じる
+      $script:closeRequestedAt = Get-Date
       Write-Json $res @{ ok = $true } 200
-      try { $script:listenerRef.Stop() } catch {}
-      try { $script:listenerRef.Close() } catch {}
       continue
     }
     if ($path -eq '/api/config/basePath' -and $req.HttpMethod -eq 'POST') {

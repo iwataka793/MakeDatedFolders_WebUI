@@ -188,6 +188,23 @@ async function keepAlive(){
   } catch(e){}
 }
 
+function requestClose(){
+  try{
+    const payload = JSON.stringify({ ts: new Date().toISOString() });
+    if (navigator.sendBeacon){
+      const blob = new Blob([payload], { type: 'application/json' });
+      navigator.sendBeacon('/api/close', blob);
+    } else {
+      fetch('/api/close', {
+        method:'POST',
+        headers:{'Content-Type':'application/json; charset=utf-8'},
+        body: payload,
+        keepalive: true
+      });
+    }
+  } catch(e){}
+}
+
 function wireDatePicker(inputId, buttonId){
   const input = $(inputId);
   const btn = $(buttonId);
@@ -236,6 +253,7 @@ function init(){
   keepAlive();
   setInterval(health, 5000);
   setInterval(keepAlive, 5000);
+  window.addEventListener('pagehide', requestClose);
 
 }
 
