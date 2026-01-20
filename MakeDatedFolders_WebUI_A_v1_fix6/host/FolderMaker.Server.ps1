@@ -104,6 +104,8 @@ $uiRoot = Join-Path $root 'ui'
 $script:lastPing = Get-Date
 $script:listenerRef = $listener
 $script:closeRequestedAt = $null
+$script:shutdownRequested = $false
+$script:timerRef = $null
 $timer = $null
 if (-not $NoOpenBrowser) {
   $script:AutoShutdownSeconds = 5
@@ -133,6 +135,7 @@ if (-not $NoOpenBrowser) {
     }
   })
   $timer.Start()
+  $script:timerRef = $timer
 }
 Write-Host ("[FolderMaker] listening: {0}" -f $prefix)
 Write-Host '[FolderMaker] stop: Ctrl+C'
@@ -180,6 +183,18 @@ while ($listener.IsListening) {
       # UI ウィンドウが閉じられたらサーバも終了 → Start.bat の PowerShell ホストも閉じる
       $script:closeRequestedAt = Get-Date
       Write-Json $res @{ ok = $true } 200
+      continue
+    }
+    if ($path -eq '/api/shutdown' -and $req.HttpMethod -eq 'POST') {
+      $script:closeRequestedAt = Get-Date
+      $script:shutdownRequested = $true
+      Write-Json $res @{ ok = $true } 200
+      [System.Threading.ThreadPool]::QueueUserWorkItem({
+        Start-Sleep -Milliseconds 200
+        try { $script:listenerRef.Stop() } catch {}
+        try { $script:listenerRef.Close() } catch {}
+        try { if ($script:timerRef) { $script:timerRef.Stop() } } catch {}
+      }) | Out-Null
       continue
     }
     if ($path -eq '/api/config/basePath' -and $req.HttpMethod -eq 'POST') {
