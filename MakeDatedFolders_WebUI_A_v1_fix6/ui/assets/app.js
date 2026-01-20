@@ -1,6 +1,8 @@
 const $ = (id)=>document.getElementById(id);
 const state = { mode: 'Range', lastItems: [] };
 let _autoTimer = null;
+let _closeRequested = false;
+const _skipCloseKey = 'skipCloseOnce';
 
 function iso(d){ return d.toISOString().slice(0,10); }
 
@@ -188,7 +190,19 @@ async function keepAlive(){
   } catch(e){}
 }
 
+function shouldSkipClose(){
+  try{
+    if (sessionStorage.getItem(_skipCloseKey)){
+      sessionStorage.removeItem(_skipCloseKey);
+      return true;
+    }
+  } catch(e){}
+  return false;
+}
+
 function requestClose(){
+  if (_closeRequested || shouldSkipClose()) { return; }
+  _closeRequested = true;
   try{
     const payload = JSON.stringify({ ts: new Date().toISOString() });
     if (navigator.sendBeacon){
@@ -236,7 +250,10 @@ function init(){
   $('btnRun').addEventListener('click', onRun);
   $('btnBrowse').addEventListener('click', onBrowse);
   $('btnSaveBase').addEventListener('click', onSaveBase);
-  $('btnReload').addEventListener('click', ()=>location.reload());
+  $('btnReload').addEventListener('click', ()=>{
+    try { sessionStorage.setItem(_skipCloseKey, '1'); } catch(e){}
+    location.reload();
+  });
 
   // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
   for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
@@ -253,6 +270,7 @@ function init(){
   keepAlive();
   setInterval(health, 5000);
   setInterval(keepAlive, 5000);
+  window.addEventListener('beforeunload', requestClose);
   window.addEventListener('pagehide', requestClose);
 
 }
