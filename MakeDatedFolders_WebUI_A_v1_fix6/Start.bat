@@ -6,5 +6,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { Get-ChildItem 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Minimized -File "%~dp0Start-WebUI.ps1" -AppMode
 if errorlevel 1 (
   echo.
-  pause
+  echo Failed to start FolderMaker WebUI.
 )
