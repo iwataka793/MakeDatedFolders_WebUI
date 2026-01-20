@@ -14,7 +14,7 @@ function setMode(mode){
   $('modeDays').classList.toggle('active', mode==='Days');
   $('endWrap').classList.toggle('hidden', mode==='Days');
   $('daysWrap').classList.toggle('hidden', mode!=='Days');
-  scheduleAutoPreview();
+  notifyPreviewRequired();
 }
 
 function setStatus(t){
@@ -82,11 +82,9 @@ function canAutoPreview(){
   return true;
 }
 
-function scheduleAutoPreview(){
+function notifyPreviewRequired(){
   clearTimeout(_autoTimer);
-  _autoTimer = setTimeout(()=>{
-    if(canAutoPreview()) onPreview();
-  }, 450);
+  setStatus('設定が変わりました。プレビューを押してください。');
 }
 
 async function api(path, body){
@@ -104,7 +102,6 @@ async function loadConfig(){
       setCfgPath(j.configPath);
       if(j.config && j.config.DefaultBasePath && !$('basePath').value){ $('basePath').value = j.config.DefaultBasePath; }
       setStatus('config loaded');
-      scheduleAutoPreview();
     } else {
       setStatus('config load failed');
     }
@@ -162,8 +159,7 @@ async function onBrowse(){
       throw new Error((j.errors && j.errors[0]) || `HTTP ${res.status}`);
     }
     if(j.path){ $('basePath').value = j.path; }
-    setStatus('folder selected');
-    scheduleAutoPreview();
+    notifyPreviewRequired();
   } catch(e){
     setStatus('error: ' + e.message);
   }
@@ -277,8 +273,8 @@ function init(){
   // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
   for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
     const el = $(id);
-    el.addEventListener('input', scheduleAutoPreview);
-    el.addEventListener('change', scheduleAutoPreview);
+    el.addEventListener('input', notifyPreviewRequired);
+    el.addEventListener('change', notifyPreviewRequired);
   }
 
   wireDatePicker('startDate', 'startDateBtn');
