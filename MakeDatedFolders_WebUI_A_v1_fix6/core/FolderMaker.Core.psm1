@@ -98,6 +98,31 @@ function Get-PathScanLimits {
     }
 }
 
+function Get-ScanExcludeNames {
+    [CmdletBinding()]
+    param()
+
+    $excludeNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @('System Volume Information', '$RECYCLE.BIN', 'RECYCLER', 'RECYCLE.BIN')) {
+        [void]$excludeNames.Add($name)
+    }
+    return $excludeNames
+}
+
+function Assert-ScanWithinLimits {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$ScanCount,
+        [Parameter(Mandatory)][int]$MaxDirectories,
+        [Parameter(Mandatory)][int]$TimeoutMs,
+        [Parameter(Mandatory)][System.Diagnostics.Stopwatch]$Timer
+    )
+
+    if ($Timer.ElapsedMilliseconds -ge $TimeoutMs -or $ScanCount -ge $MaxDirectories) {
+        throw ('探索上限を超えました。BasePath を年度フォルダ/年フォルダ/月フォルダまで絞ってください。（上限: {0}件, {1}ms）' -f $MaxDirectories, $TimeoutMs)
+    }
+}
+
 function Convert-ToBoolOrDefault {
     param([object]$Value, [bool]$Default)
     if ($null -eq $Value) { return $Default }
@@ -206,10 +231,7 @@ function Find-ExistingMonthContainerByMMdd {
     $timeoutMs = [int]$limits.TimeoutMs
     $scanCount = 0
     $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
-    $excludeNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($name in @('System Volume Information', '$RECYCLE.BIN', 'RECYCLER', 'RECYCLE.BIN')) {
-        [void]$excludeNames.Add($name)
-    }
+    $excludeNames = Get-ScanExcludeNames
 
     $queue = New-Object System.Collections.Generic.Queue[object]
     $queue.Enqueue(@($BasePath, 0))
@@ -223,18 +245,14 @@ function Find-ExistingMonthContainerByMMdd {
 
         if ($depth -gt $MaxDepth) { continue }
 
-        if ($scanTimer.ElapsedMilliseconds -ge $timeoutMs -or $scanCount -ge $maxDirs) {
-            throw ('探索上限を超えました。BasePath を年度フォルダ/年フォルダ/月フォルダまで絞ってください。（上限: {0}件, {1}ms）' -f $maxDirs, $timeoutMs)
-        }
+        Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
 
         $children = $null
         try { $children = [System.IO.Directory]::EnumerateDirectories($path) } catch { throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $path, $_.Exception.Message) }
 
         foreach ($d in $children) {
             $scanCount++
-            if ($scanTimer.ElapsedMilliseconds -ge $timeoutMs -or $scanCount -ge $maxDirs) {
-                throw ('探索上限を超えました。BasePath を年度フォルダ/年フォルダ/月フォルダまで絞ってください。（上限: {0}件, {1}ms）' -f $maxDirs, $timeoutMs)
-            }
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
 
             $dirName = [System.IO.Path]::GetFileName($d)
             if ($excludeNames.Contains($dirName)) { continue }
@@ -298,14 +316,25 @@ function Find-CombinedYearMonthFolder {
     $rxYear = ('(?<!\d){0}(?!\d)' -f [Regex]::Escape($y))
     $rxMonth = ('(?<!\d)({0}|{1})(?!\d)' -f [Regex]::Escape($m1), [Regex]::Escape($m2))
 
+    $limits = Get-PathScanLimits -BasePath $BasePath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = Get-ScanExcludeNames
     try {
         foreach ($d in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
+            $scanCount++
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
+            $dirName = [System.IO.Path]::GetFileName($d)
+            if ($excludeNames.Contains($dirName)) { continue }
+            $nameNorm = Convert-ToHalfWidthDigits -Text $dirName
             if ($nameNorm -match $rxYear -and $nameNorm -match $rxMonth -and $nameNorm -match '月') {
                 return $d
             }
         }
     } catch {
+        if ($_.Exception.Message -like '探索上限を超えました*') { throw $_.Exception.Message }
         throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
     return $null
@@ -342,14 +371,25 @@ function Find-YearFolder {
     if (-not (Test-Path -LiteralPath $BasePath)) { return $null }
 
     $y = [string]$Year
+    $limits = Get-PathScanLimits -BasePath $BasePath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = Get-ScanExcludeNames
     try {
         foreach ($d in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
+            $scanCount++
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
+            $dirName = [System.IO.Path]::GetFileName($d)
+            if ($excludeNames.Contains($dirName)) { continue }
+            $nameNorm = Convert-ToHalfWidthDigits -Text $dirName
             if ($nameNorm -match $y) {
                 return $d
             }
         }
     } catch {
+        if ($_.Exception.Message -like '探索上限を超えました*') { throw $_.Exception.Message }
         throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
 
@@ -375,9 +415,19 @@ function Find-MonthFolder {
         '(?<!\d){0}(?!\d)' -f ('{0:00}' -f $m)
     )
 
+    $limits = Get-PathScanLimits -BasePath $YearPath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = Get-ScanExcludeNames
     try {
         foreach ($d in [System.IO.Directory]::EnumerateDirectories($YearPath)) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
+            $scanCount++
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
+            $dirName = [System.IO.Path]::GetFileName($d)
+            if ($excludeNames.Contains($dirName)) { continue }
+            $nameNorm = Convert-ToHalfWidthDigits -Text $dirName
             foreach ($pat in $patterns) {
                 if ($nameNorm -match $pat) {
                     return $d
@@ -385,6 +435,7 @@ function Find-MonthFolder {
             }
         }
     } catch {
+        if ($_.Exception.Message -like '探索上限を超えました*') { throw $_.Exception.Message }
         throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $YearPath, $_.Exception.Message)
     }
 
@@ -542,9 +593,19 @@ function Get-ExistingIndicesForDate {
         return $indices
     }
 
+    $limits = Get-PathScanLimits -BasePath $BasePath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = Get-ScanExcludeNames
     try {
         foreach ($dir in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
-            $n = [System.IO.Path]::GetFileName($dir)
+            $scanCount++
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
+            $dirName = [System.IO.Path]::GetFileName($dir)
+            if ($excludeNames.Contains($dirName)) { continue }
+            $n = $dirName
             if ($n -match $pattern) {
                 $parts = $n -split '-'
                 if ($parts.Count -ge 2) {
@@ -555,6 +616,7 @@ function Get-ExistingIndicesForDate {
         }
     }
     catch {
+        if ($_.Exception.Message -like '探索上限を超えました*') { throw $_.Exception.Message }
         throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
 
@@ -573,9 +635,19 @@ function Get-ExistingIndicesByMonth {
         return $result
     }
 
+    $limits = Get-PathScanLimits -BasePath $MonthPath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = Get-ScanExcludeNames
     try {
         foreach ($dir in [System.IO.Directory]::EnumerateDirectories($MonthPath)) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($dir))
+            $scanCount++
+            Assert-ScanWithinLimits -ScanCount $scanCount -MaxDirectories $maxDirs -TimeoutMs $timeoutMs -Timer $scanTimer
+            $dirName = [System.IO.Path]::GetFileName($dir)
+            if ($excludeNames.Contains($dirName)) { continue }
+            $nameNorm = Convert-ToHalfWidthDigits -Text $dirName
             if ($nameNorm -match '^(?<date>\d{4})-(?<index>\d+)$') {
                 $dateKey = $Matches['date']
                 $index = $Matches['index'] -as [int]
