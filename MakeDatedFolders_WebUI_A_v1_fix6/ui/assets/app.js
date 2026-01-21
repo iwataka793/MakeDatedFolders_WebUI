@@ -1,10 +1,17 @@
 const $ = (id)=>document.getElementById(id);
-const state = { mode: 'Range', lastItems: [] };
-let _autoTimer = null;
+const state = {
+  mode: 'Range',
+  lastItems: [],
+  previewSeq: 0,
+  previewController: null,
+  isPreviewing: false,
+  isDirty: false
+};
 let _closeRequested = false;
 let _reloadRequested = false;
 let _shutdownRequested = false;
 const _skipCloseKey = 'skipCloseOnce';
+const PREVIEW_TIMEOUT_MS = 30000;
 
 function iso(d){ return d.toISOString().slice(0,10); }
 
@@ -14,7 +21,7 @@ function setMode(mode){
   $('modeDays').classList.toggle('active', mode==='Days');
   $('endWrap').classList.toggle('hidden', mode==='Days');
   $('daysWrap').classList.toggle('hidden', mode!=='Days');
-  scheduleAutoPreview();
+  markDirty('mode');
 }
 
 function setStatus(t){
@@ -71,26 +78,33 @@ function payload(){
   return { basePath, mode: state.mode, startDate, endDate, daysToMake, foldersPerDay, firstDayStartIndex };
 }
 
-function canAutoPreview(){
+function validatePayload(){
+  const errors = [];
   const p = payload();
-  if(!p.basePath) return false;
-  if(!p.startDate) return false;
-  if(p.mode==='Range' && !p.endDate) return false;
-  if(p.mode==='Days' && (!Number.isFinite(p.daysToMake) || p.daysToMake<1)) return false;
-  if(!Number.isFinite(p.foldersPerDay) || p.foldersPerDay<1) return false;
-  if(!Number.isFinite(p.firstDayStartIndex) || p.firstDayStartIndex<1) return false;
-  return true;
+  if(!p.basePath) errors.push('作成先パスを入力してください');
+  if(!p.startDate) errors.push('開始日を入力してください');
+  if(p.mode==='Range' && !p.endDate) errors.push('終了日を入力してください');
+  if(p.mode==='Days' && (!Number.isFinite(p.daysToMake) || p.daysToMake<1)) errors.push('日数は1以上にしてください');
+  if(!Number.isFinite(p.foldersPerDay) || p.foldersPerDay<1) errors.push('最大番号は1以上にしてください');
+  if(!Number.isFinite(p.firstDayStartIndex) || p.firstDayStartIndex<1) errors.push('初日の開始番号は1以上にしてください');
+  return errors;
 }
 
-function scheduleAutoPreview(){
-  clearTimeout(_autoTimer);
-  _autoTimer = setTimeout(()=>{
-    if(canAutoPreview()) onPreview();
-  }, 450);
+function setPreviewBusy(busy){
+  state.isPreviewing = busy;
+  $('btnPreview').disabled = busy;
+  $('btnPreview').classList.toggle('ghost', busy);
 }
 
-async function api(path, body){
-  const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json; charset=utf-8'}, body: JSON.stringify(body) });
+function markDirty(){
+  state.isDirty = true;
+  if(!state.isPreviewing){
+    setStatus('変更されました。プレビューを押してください。');
+  }
+}
+
+async function api(path, body, opts = {}){
+  const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json; charset=utf-8'}, body: JSON.stringify(body), signal: opts.signal });
   const j = await res.json().catch(()=>({ok:false, errors:['invalid json response']}));
   if(!res.ok || !j.ok){ throw new Error((j.errors && j.errors[0]) || `HTTP ${res.status}`); }
   return j;
@@ -104,7 +118,7 @@ async function loadConfig(){
       setCfgPath(j.configPath);
       if(j.config && j.config.DefaultBasePath && !$('basePath').value){ $('basePath').value = j.config.DefaultBasePath; }
       setStatus('config loaded');
-      scheduleAutoPreview();
+      if(j.config && j.config.DefaultBasePath){ markDirty(); }
     } else {
       setStatus('config load failed');
     }
@@ -121,16 +135,43 @@ async function health(){
 }
 
 async function onPreview(){
-  setStatus('preview...');
+  const errors = validatePayload();
+  if(errors.length){
+    setStatus('error: ' + errors[0]);
+    return;
+  }
+  const seq = ++state.previewSeq;
+  if(state.previewController){ state.previewController.abort(); }
+  const controller = new AbortController();
+  state.previewController = controller;
+  setPreviewBusy(true);
+  setStatus('プレビュー中...');
+  let timedOut = false;
+  const timeoutId = setTimeout(()=>{
+    timedOut = true;
+    controller.abort();
+  }, PREVIEW_TIMEOUT_MS);
   try{
-    const j = await api('/api/preview', payload());
+    const j = await api('/api/preview', payload(), { signal: controller.signal });
+    if(seq !== state.previewSeq){ return; }
     updateSummary(j.summary);
     render(j.items);
-    setStatus('preview ready');
+    state.isDirty = false;
+    setStatus('プレビュー完了');
   } catch(e){
+    if(seq !== state.previewSeq){ return; }
+    if(e.name === 'AbortError'){
+      setStatus(timedOut ? 'プレビューがタイムアウトしました。' : 'プレビューをキャンセルしました。');
+      return;
+    }
     updateSummary(null);
     render([]);
     setStatus('error: ' + e.message);
+  } finally {
+    clearTimeout(timeoutId);
+    if(seq === state.previewSeq){
+      setPreviewBusy(false);
+    }
   }
 }
 
@@ -163,7 +204,7 @@ async function onBrowse(){
     }
     if(j.path){ $('basePath').value = j.path; }
     setStatus('folder selected');
-    scheduleAutoPreview();
+    markDirty();
   } catch(e){
     setStatus('error: ' + e.message);
   }
@@ -274,11 +315,11 @@ function init(){
   });
   $('btnShutdown').addEventListener('click', requestShutdown);
 
-  // 入力変更で自動プレビュー（フォルダが選ばれている時だけ）
+  // 入力変更はプレビュー未実行の案内のみ
   for(const id of ['basePath','startDate','endDate','daysToMake','foldersPerDay','firstDayStartIndex']){
     const el = $(id);
-    el.addEventListener('input', scheduleAutoPreview);
-    el.addEventListener('change', scheduleAutoPreview);
+    el.addEventListener('input', markDirty);
+    el.addEventListener('change', markDirty);
   }
 
   wireDatePicker('startDate', 'startDateBtn');
