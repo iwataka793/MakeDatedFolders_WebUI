@@ -16,10 +16,10 @@
 .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--mut)}
 .kv span:last-child{color:var(--txt);opacity:.9;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .main{flex:1;padding:22px 22px 30px}
-.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:16px}
+.header{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .header h1{margin:0 0 6px 0;font-size:22px}
 .muted{margin:0;color:var(--mut);font-size:13px;line-height:1.5}
-.header-actions{display:flex;gap:10px}
+.header-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .card{border:1px solid var(--line);border-radius:var(--rad);padding:14px 14px 12px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.04));box-shadow:0 20px 55px rgba(0,0,0,.35)}
 .card.wide{grid-column:1 / -1}
@@ -40,9 +40,10 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:0;pointer-events:n
 .seg-btn{flex:1;padding:10px 10px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--txt);cursor:pointer}
 .seg-btn.active{background:linear-gradient(90deg,rgba(107,227,255,.18),rgba(124,92,255,.18));box-shadow:0 0 0 1px rgba(255,255,255,.08), 0 14px 35px rgba(0,0,0,.35)}
 .actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.btn{padding:10px 14px;border-radius:14px;border:1px solid rgba(255,255,255,.18);background:linear-gradient(90deg,rgba(107,227,255,.25),rgba(124,92,255,.22));color:var(--txt);cursor:pointer;font-weight:700}
+.btn{padding:10px 14px;border-radius:14px;border:1px solid rgba(255,255,255,.18);background:linear-gradient(90deg,rgba(107,227,255,.25),rgba(124,92,255,.22));color:var(--txt);cursor:pointer;font-weight:700;white-space:nowrap}
 .btn:hover{filter:brightness(1.08)}
 .btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.6;cursor:not-allowed;filter:none;transform:none}
 .btn.ghost{background:rgba(255,255,255,.03);border-color:var(--line)}
 .btn.danger{background:linear-gradient(90deg,rgba(255,77,109,.28),rgba(124,92,255,.18));border-color:rgba(255,77,109,.35)}
 .spacer{flex:1}
@@ -60,7 +61,7 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:0;pointer-events:n
 .path{color:var(--txt);opacity:.86;word-break:break-all}
 .kind{color:var(--txt);opacity:.92}
 .hidden{display:none}
-.btn-stack{display:flex;flex-direction:column;gap:8px}
+.btn-stack{display:flex;flex-direction:column;gap:8px;min-width:110px}
 @media (max-width: 980px){.sidebar{display:none}.grid{grid-template-columns:1fr}.main{padding:16px}}
 
 .status.error{color:var(--danger);font-weight:600;}
