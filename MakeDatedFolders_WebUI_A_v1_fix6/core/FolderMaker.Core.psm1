@@ -28,6 +28,49 @@ function Get-FolderMakerConfigPath {
     return (Join-Path $root 'FolderMaker.config.ini')
 }
 
+function Get-MonthFromName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $n = Convert-ToHalfWidthDigits -Text $Name
+    if ($n -match '(?<!\d)(?<m>1[0-2]|0?[1-9])(?=月)') { return [int]$Matches['m'] }
+    if ($n -match '^(?<m>1[0-2]|0?[1-9])$') { return [int]$Matches['m'] }
+    return $null
+}
+
+function Get-YearFromName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $n = Convert-ToHalfWidthDigits -Text $Name
+    if ($n -match '(?<!\d)(?<y>\d{4})(?!\d)') { return [int]$Matches['y'] }
+    return $null
+}
+
+function Get-BasePathInfo {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BasePath)
+
+    $leaf = Split-Path -Leaf $BasePath
+    $month = $null
+    $year = $null
+    if ($leaf) {
+        $month = Get-MonthFromName -Name $leaf
+        $year = Get-YearFromName -Name $leaf
+    }
+
+    $kind = 'Root'
+    if ($null -ne $month) { $kind = 'Month' }
+    elseif ($null -ne $year) { $kind = 'Year' }
+
+    return [pscustomobject]@{
+        Kind  = $kind
+        Year  = $year
+        Month = $month
+        Leaf  = $leaf
+    }
+}
+
 function Convert-ToBoolOrDefault {
     param([object]$Value, [bool]$Default)
     if ($null -eq $Value) { return $Default }
@@ -326,17 +369,18 @@ function Resolve-YearMonthPath {
     $month = $Date.Month
     $year = if ($useFiscal) { Get-FiscalYear -Date $Date -StartMonth $fyStart } else { $calendarYear }
 
-    # A案：既存 "MMdd-n" を優先（親フォルダを採用）
-    $dateStr = $Date.ToString('MMdd')
-    $mmddParent = Find-ExistingMonthContainerByMMdd -BasePath $BasePath -DateString $dateStr -MaxDepth $searchDepth -Year $calendarYear -Month $month
-    if ($mmddParent) {
+    $baseInfo = Get-BasePathInfo -BasePath $BasePath
+    $isBaseMonth = ($baseInfo.Kind -eq 'Month')
+    $isBaseYear = ($baseInfo.Kind -eq 'Year')
+
+    if ($isBaseMonth) {
         return [pscustomobject]@{
             Year                 = $year
             Month                = $month
             YearFolderName        = $null
-            MonthFolderName       = (Split-Path -Leaf $mmddParent)
+            MonthFolderName       = (Split-Path -Leaf $BasePath)
             YearPath             = $null
-            MonthPath            = $mmddParent
+            MonthPath            = $BasePath
             YearMatchedExisting  = $false
             MonthMatchedExisting = $true
             UsesExistingMMddParent = $true
@@ -344,8 +388,28 @@ function Resolve-YearMonthPath {
         }
     }
 
+    # A案：既存 "MMdd-n" を優先（親フォルダを採用） (Root 配下のみ探索)
+    if (-not $isBaseYear) {
+        $dateStr = $Date.ToString('MMdd')
+        $mmddParent = Find-ExistingMonthContainerByMMdd -BasePath $BasePath -DateString $dateStr -MaxDepth $searchDepth -Year $calendarYear -Month $month
+        if ($mmddParent) {
+            return [pscustomobject]@{
+                Year                 = $year
+                Month                = $month
+                YearFolderName        = $null
+                MonthFolderName       = (Split-Path -Leaf $mmddParent)
+                YearPath             = $null
+                MonthPath            = $mmddParent
+                YearMatchedExisting  = $false
+                MonthMatchedExisting = $true
+                UsesExistingMMddParent = $true
+                UsesCombined         = $false
+            }
+        }
+    }
+
     # 標準階層（Year\Month）を探す
-    $yearExistingPath = Find-YearFolder -BasePath $BasePath -Year $year
+    $yearExistingPath = if ($isBaseYear) { $BasePath } else { Find-YearFolder -BasePath $BasePath -Year $year }
 
     # FiscalYear を使っていて見つからない場合、念のためカレンダー年も試す
     if (-not $yearExistingPath -and $useFiscal -and $year -ne $calendarYear) {
@@ -366,16 +430,15 @@ function Resolve-YearMonthPath {
     # B案：結合フォルダ "YYYY年M月 / YYYY年度M月"（標準が無い場合のみ採用）
     $combinedPath = $null
     if ($allowCombined -and -not $standardMonthExists) {
-        $combinedPath = Find-CombinedYearMonthFolder -BasePath $BasePath -Year $calendarYear -Month $month
-        if (-not $combinedPath -and $useFiscal -and $year -ne $calendarYear) {
-            $combinedPath = Find-CombinedYearMonthFolder -BasePath $BasePath -Year $year -Month $month
-        }
-        # 年フォルダ直下に結合があるケースも吸収
-        if (-not $combinedPath -and (Test-Path -LiteralPath $yearPath)) {
-            $combinedPath = Find-CombinedYearMonthFolder -BasePath $yearPath -Year $calendarYear -Month $month
+        $combinedRoots = @($yearPath)
+        if (-not $isBaseYear) { $combinedRoots = @($BasePath, $yearPath) }
+        foreach ($root in $combinedRoots) {
+            if (-not $root) { continue }
+            $combinedPath = Find-CombinedYearMonthFolder -BasePath $root -Year $calendarYear -Month $month
             if (-not $combinedPath -and $useFiscal -and $year -ne $calendarYear) {
-                $combinedPath = Find-CombinedYearMonthFolder -BasePath $yearPath -Year $year -Month $month
+                $combinedPath = Find-CombinedYearMonthFolder -BasePath $root -Year $year -Month $month
             }
+            if ($combinedPath) { break }
         }
     }
 
@@ -454,7 +517,8 @@ function Get-ExistingIndicesForDate {
 function Get-ExistingIndicesByMonth {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$MonthPath
+        [Parameter(Mandatory)][string]$MonthPath,
+        [ref]$ErrorMessage
     )
 
     $result = @{}
@@ -478,6 +542,7 @@ function Get-ExistingIndicesByMonth {
         }
     }
     catch {
+        if ($ErrorMessage) { $ErrorMessage.Value = $_.Exception.Message }
         # ネットワークドライブ等の一時エラーでも落とさず空結果で返す
         return @{}
     }
@@ -533,11 +598,17 @@ function Get-PlannedFolderList {
     $seenYear  = New-Object 'System.Collections.Generic.HashSet[string]'
     $seenMonth = New-Object 'System.Collections.Generic.HashSet[string]'
     $monthIndexCache = @{}
+    $ymCache = @{}
 
     for ($dayOffset = 0; $dayOffset -lt $totalDays; $dayOffset++) {
         $date = $StartDate.Date.AddDays($dayOffset)
-
-        $ym = Resolve-YearMonthPath -BasePath $BasePath -Date $date
+        $ymKey = $date.ToString('yyyyMM')
+        if ($ymCache.ContainsKey($ymKey)) {
+            $ym = $ymCache[$ymKey]
+        } else {
+            $ym = Resolve-YearMonthPath -BasePath $BasePath -Date $date
+            $ymCache[$ymKey] = $ym
+        }
 
         # 年度フォルダ計画
         if ($ym.YearPath -and -not $seenYear.Contains($ym.YearPath)) {
@@ -579,7 +650,11 @@ function Get-PlannedFolderList {
         $dateStr = $date.ToString('MMdd')
 
         if (-not $monthIndexCache.ContainsKey($ym.MonthPath)) {
-            $monthIndexCache[$ym.MonthPath] = Get-ExistingIndicesByMonth -MonthPath $ym.MonthPath
+            $monthError = $null
+            $monthIndexCache[$ym.MonthPath] = Get-ExistingIndicesByMonth -MonthPath $ym.MonthPath -ErrorMessage ([ref]$monthError)
+            if ($monthError) {
+                throw ('月フォルダの列挙に失敗しました: {0} ({1})' -f $ym.MonthPath, $monthError)
+            }
         }
         $monthIndexMap = $monthIndexCache[$ym.MonthPath]
         $existingIndices = if ($monthIndexMap.ContainsKey($dateStr)) { $monthIndexMap[$dateStr] } else { $null }
@@ -664,4 +739,4 @@ function New-DateIndexedFolders {
 }
 
 
-Export-ModuleMember -Function Initialize-FolderMakerConfig,Get-FolderMakerConfigPath,Load-FolderMakerConfig,Save-FolderMakerConfig,Resolve-YearMonthPath,Get-DateRange,Get-PlannedFolderList,New-DateIndexedFolders
+Export-ModuleMember -Function Initialize-FolderMakerConfig,Get-FolderMakerConfigPath,Load-FolderMakerConfig,Save-FolderMakerConfig,Get-BasePathInfo,Resolve-YearMonthPath,Get-DateRange,Get-PlannedFolderList,New-DateIndexedFolders
