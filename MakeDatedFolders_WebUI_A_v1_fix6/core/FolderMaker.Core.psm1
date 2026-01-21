@@ -71,6 +71,33 @@ function Get-BasePathInfo {
     }
 }
 
+function Get-PathScanLimits {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BasePath)
+
+    $isNetwork = $false
+    if ($BasePath -like '\\*') {
+        $isNetwork = $true
+    } else {
+        try {
+            $root = [System.IO.Path]::GetPathRoot($BasePath)
+            if ($root) {
+                $drive = New-Object System.IO.DriveInfo($root)
+                if ($drive.DriveType -eq [System.IO.DriveType]::Network) { $isNetwork = $true }
+            }
+        } catch {}
+    }
+
+    $maxDirs = if ($isNetwork) { 800 } else { 2000 }
+    $timeoutMs = if ($isNetwork) { 5000 } else { 8000 }
+
+    return [pscustomobject]@{
+        IsNetwork      = $isNetwork
+        MaxDirectories = $maxDirs
+        TimeoutMs      = $timeoutMs
+    }
+}
+
 function Convert-ToBoolOrDefault {
     param([object]$Value, [bool]$Default)
     if ($null -eq $Value) { return $Default }
@@ -174,6 +201,15 @@ function Find-ExistingMonthContainerByMMdd {
     if (-not (Test-Path -LiteralPath $BasePath)) { return $null }
 
     $pattern = ('^{0}-\d+$' -f [Regex]::Escape($DateString))
+    $limits = Get-PathScanLimits -BasePath $BasePath
+    $maxDirs = [int]$limits.MaxDirectories
+    $timeoutMs = [int]$limits.TimeoutMs
+    $scanCount = 0
+    $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $excludeNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @('System Volume Information', '$RECYCLE.BIN', 'RECYCLER', 'RECYCLE.BIN')) {
+        [void]$excludeNames.Add($name)
+    }
 
     $queue = New-Object System.Collections.Generic.Queue[object]
     $queue.Enqueue(@($BasePath, 0))
@@ -187,14 +223,26 @@ function Find-ExistingMonthContainerByMMdd {
 
         if ($depth -gt $MaxDepth) { continue }
 
+        if ($scanTimer.ElapsedMilliseconds -ge $timeoutMs -or $scanCount -ge $maxDirs) {
+            throw ('探索上限を超えました。BasePath を年度フォルダ/年フォルダ/月フォルダまで絞ってください。（上限: {0}件, {1}ms）' -f $maxDirs, $timeoutMs)
+        }
+
         $children = $null
-        try { $children = Get-ChildItem -LiteralPath $path -Directory -ErrorAction Stop } catch { $children = @() }
+        try { $children = [System.IO.Directory]::EnumerateDirectories($path) } catch { throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $path, $_.Exception.Message) }
 
         foreach ($d in $children) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text $d.Name
+            $scanCount++
+            if ($scanTimer.ElapsedMilliseconds -ge $timeoutMs -or $scanCount -ge $maxDirs) {
+                throw ('探索上限を超えました。BasePath を年度フォルダ/年フォルダ/月フォルダまで絞ってください。（上限: {0}件, {1}ms）' -f $maxDirs, $timeoutMs)
+            }
+
+            $dirName = [System.IO.Path]::GetFileName($d)
+            if ($excludeNames.Contains($dirName)) { continue }
+
+            $nameNorm = Convert-ToHalfWidthDigits -Text $dirName
 
             if ($nameNorm -match $pattern) {
-                $parent = Split-Path -Parent $d.FullName
+                $parent = Split-Path -Parent $d
                 # Base配下安全チェック
                 if (-not ($parent.StartsWith($BasePath, [StringComparison]::OrdinalIgnoreCase))) { continue }
 
@@ -218,7 +266,7 @@ function Find-ExistingMonthContainerByMMdd {
             }
 
             if ($depth -lt $MaxDepth) {
-                $queue.Enqueue(@($d.FullName, ($depth + 1)))
+                $queue.Enqueue(@($d, ($depth + 1)))
             }
         }
     }
@@ -250,13 +298,15 @@ function Find-CombinedYearMonthFolder {
     $rxYear = ('(?<!\d){0}(?!\d)' -f [Regex]::Escape($y))
     $rxMonth = ('(?<!\d)({0}|{1})(?!\d)' -f [Regex]::Escape($m1), [Regex]::Escape($m2))
 
-    try { $dirs = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop } catch { $dirs = @() }
-
-    foreach ($d in $dirs) {
-        $nameNorm = Convert-ToHalfWidthDigits -Text $d.Name
-        if ($nameNorm -match $rxYear -and $nameNorm -match $rxMonth -and $nameNorm -match '月') {
-            return $d.FullName
+    try {
+        foreach ($d in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
+            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
+            if ($nameNorm -match $rxYear -and $nameNorm -match $rxMonth -and $nameNorm -match '月') {
+                return $d
+            }
         }
+    } catch {
+        throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
     return $null
 }
@@ -293,15 +343,14 @@ function Find-YearFolder {
 
     $y = [string]$Year
     try {
-        $dirs = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop
-        foreach ($d in $dirs) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text $d.Name
+        foreach ($d in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
+            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
             if ($nameNorm -match $y) {
-                return $d.FullName
+                return $d
             }
         }
     } catch {
-        return $null
+        throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
 
     return $null
@@ -327,17 +376,16 @@ function Find-MonthFolder {
     )
 
     try {
-        $dirs = Get-ChildItem -LiteralPath $YearPath -Directory -ErrorAction Stop
-        foreach ($d in $dirs) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text $d.Name
+        foreach ($d in [System.IO.Directory]::EnumerateDirectories($YearPath)) {
+            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($d))
             foreach ($pat in $patterns) {
                 if ($nameNorm -match $pat) {
-                    return $d.FullName
+                    return $d
                 }
             }
         }
     } catch {
-        return $null
+        throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $YearPath, $_.Exception.Message)
     }
 
     return $null
@@ -495,8 +543,8 @@ function Get-ExistingIndicesForDate {
     }
 
     try {
-        $names = Get-ChildItem -LiteralPath $BasePath -Directory -Name -ErrorAction Stop
-        foreach ($n in $names) {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($BasePath)) {
+            $n = [System.IO.Path]::GetFileName($dir)
             if ($n -match $pattern) {
                 $parts = $n -split '-'
                 if ($parts.Count -ge 2) {
@@ -507,8 +555,7 @@ function Get-ExistingIndicesForDate {
         }
     }
     catch {
-        # ネットワークドライブ等で一時エラーでも落とさず「既存なし」として扱う
-        return $indices
+        throw ('フォルダの列挙に失敗しました: {0} ({1})' -f $BasePath, $_.Exception.Message)
     }
 
     return $indices
@@ -527,9 +574,8 @@ function Get-ExistingIndicesByMonth {
     }
 
     try {
-        $names = Get-ChildItem -LiteralPath $MonthPath -Directory -Name -ErrorAction Stop
-        foreach ($n in $names) {
-            $nameNorm = Convert-ToHalfWidthDigits -Text $n
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($MonthPath)) {
+            $nameNorm = Convert-ToHalfWidthDigits -Text ([System.IO.Path]::GetFileName($dir))
             if ($nameNorm -match '^(?<date>\d{4})-(?<index>\d+)$') {
                 $dateKey = $Matches['date']
                 $index = $Matches['index'] -as [int]
@@ -588,11 +634,15 @@ function Get-PlannedFolderList {
         [Parameter(Mandatory)][datetime]$StartDate,
         [Parameter(Mandatory)][datetime]$EndDate,
         [Parameter(Mandatory)][ValidateRange(1,999)][int]$FoldersPerDay,
-        [Parameter(Mandatory)][ValidateRange(1,999)][int]$FirstDayStartIndex
+        [Parameter(Mandatory)][ValidateRange(1,999)][int]$FirstDayStartIndex,
+        [ref]$PerfInfo
     )
 
     $results = New-Object System.Collections.Generic.List[object]
     $totalDays = ($EndDate.Date - $StartDate.Date).Days + 1
+    $totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $resolveMs = 0
+    $monthIndexMs = 0
 
     # 重複防止用
     $seenYear  = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -606,7 +656,9 @@ function Get-PlannedFolderList {
         if ($ymCache.ContainsKey($ymKey)) {
             $ym = $ymCache[$ymKey]
         } else {
+            $resolveTimer = [System.Diagnostics.Stopwatch]::StartNew()
             $ym = Resolve-YearMonthPath -BasePath $BasePath -Date $date
+            $resolveMs += $resolveTimer.ElapsedMilliseconds
             $ymCache[$ymKey] = $ym
         }
 
@@ -651,7 +703,9 @@ function Get-PlannedFolderList {
 
         if (-not $monthIndexCache.ContainsKey($ym.MonthPath)) {
             $monthError = $null
+            $monthIndexTimer = [System.Diagnostics.Stopwatch]::StartNew()
             $monthIndexCache[$ym.MonthPath] = Get-ExistingIndicesByMonth -MonthPath $ym.MonthPath -ErrorMessage ([ref]$monthError)
+            $monthIndexMs += $monthIndexTimer.ElapsedMilliseconds
             if ($monthError) {
                 throw ('月フォルダの列挙に失敗しました: {0} ({1})' -f $ym.MonthPath, $monthError)
             }
@@ -687,6 +741,16 @@ function Get-PlannedFolderList {
         }
     }
 
+    if ($PerfInfo) {
+        $PerfInfo.Value = [pscustomobject]@{
+            TotalMs            = $totalTimer.ElapsedMilliseconds
+            ResolveYearMonthMs = $resolveMs
+            MonthIndexMs       = $monthIndexMs
+            Days               = $totalDays
+            UniqueMonths       = $seenMonth.Count
+        }
+    }
+
     return $results
 }
 
@@ -703,7 +767,8 @@ function New-DateIndexedFolders {
         [Parameter(Mandatory)][datetime]$StartDate,
         [Parameter(Mandatory)][datetime]$EndDate,
         [Parameter(Mandatory)][ValidateRange(1,999)][int]$FoldersPerDay,
-        [Parameter(Mandatory)][ValidateRange(1,999)][int]$FirstDayStartIndex
+        [Parameter(Mandatory)][ValidateRange(1,999)][int]$FirstDayStartIndex,
+        [ref]$PerfInfo
     )
 
     if (-not (Test-Path -LiteralPath $BasePath)) {
@@ -711,7 +776,7 @@ function New-DateIndexedFolders {
     }
 
     $plan = Get-PlannedFolderList -BasePath $BasePath -StartDate $StartDate -EndDate $EndDate `
-        -FoldersPerDay $FoldersPerDay -FirstDayStartIndex $FirstDayStartIndex
+        -FoldersPerDay $FoldersPerDay -FirstDayStartIndex $FirstDayStartIndex -PerfInfo $PerfInfo
 
     $out = New-Object System.Collections.Generic.List[object]
 
