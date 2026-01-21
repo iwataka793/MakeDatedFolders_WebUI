@@ -19,7 +19,10 @@
 .header{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .header h1{margin:0 0 6px 0;font-size:22px}
 .muted{margin:0;color:var(--mut);font-size:13px;line-height:1.5}
-.header-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.header-actions{display:flex;gap:10px;flex-wrap:nowrap;justify-content:flex-end;align-items:center;max-width:100%;overflow-x:auto;padding-bottom:2px}
+.header-actions::-webkit-scrollbar{height:6px}
+.header-actions::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:999px}
+.header-actions::-webkit-scrollbar-track{background:rgba(255,255,255,.06)}
 .header-actions .btn{flex:0 0 auto;min-width:72px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .card{border:1px solid var(--line);border-radius:var(--rad);padding:14px 14px 12px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.04));box-shadow:0 20px 55px rgba(0,0,0,.35)}

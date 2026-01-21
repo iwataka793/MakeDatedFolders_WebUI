@@ -106,6 +106,8 @@ $script:listenerRef = $listener
 $script:closeRequestedAt = $null
 $script:shutdownRequested = $false
 $script:timerRef = $null
+$script:previewInProgress = $false
+$script:runInProgress = $false
 $timer = $null
 if (-not $NoOpenBrowser) {
   $script:AutoShutdownSeconds = 5
@@ -268,6 +270,14 @@ while ($listener.IsListening) {
       }
     }
     if (($path -eq '/api/preview' -or $path -eq '/api/run') -and $req.HttpMethod -eq 'POST') {
+      if ($path -eq '/api/preview' -and $script:previewInProgress) {
+        Write-Json $res @{ ok = $false; errors = @('プレビューが実行中です。完了してから再度お試しください。') } 409
+        continue
+      }
+      if ($path -eq '/api/run' -and $script:runInProgress) {
+        Write-Json $res @{ ok = $false; errors = @('作成処理が実行中です。完了してから再度お試しください。') } 409
+        continue
+      }
       $bodyText = Read-RequestBody $req
       $payload = $null
       try { $payload = $bodyText | ConvertFrom-Json } catch { Write-Json $res @{ok=$false;errors=@('JSONが不正です');raw=$bodyText} 400; continue }
@@ -286,32 +296,48 @@ while ($listener.IsListening) {
       if ($mode -eq 'Days' -and $daysToMake -lt 1) { $errors.Add('日数は1以上にしてください') }
       if ($endDate.Date -lt $startDate.Date) { $errors.Add('終了日は開始日以降にしてください') }
       if (-not (Test-Path -LiteralPath $basePath)) { $errors.Add(('作成先パスが存在しません: {0}' -f $basePath)) }
+      $baseInfo = if ($basePath) { Get-BasePathInfo -BasePath $basePath } else { $null }
+      if ($baseInfo -and $baseInfo.Kind -eq 'Month') {
+        if ($startDate.Year -ne $endDate.Year -or $startDate.Month -ne $endDate.Month) {
+          $errors.Add('月フォルダを作成先にした場合は、同一月の範囲のみ対応しています。開始日と終了日を同じ月にしてください。')
+        }
+      }
       if ($errors.Count -gt 0) { Write-Json $res @{ok=$false;errors=$errors} 400; continue }
       if ($path -eq '/api/preview') {
-        $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex
-        $days = ($endDate.Date - $startDate.Date).Days + 1
-	      # NOTE: PowerShell は 1件だけヒットすると配列ではなくスカラーになるため、@() で必ず配列化して .Count を安全に取る
-	      $summary = @{
-	        days  = $days
-	        total = @($plan).Count
-	        create = @($plan | Where-Object { $_.Action -eq 'Create' }).Count
-	        skip   = @($plan | Where-Object { $_.Action -eq 'Skip'   }).Count
-	        start = $startDate.ToString('yyyy-MM-dd')
-	        end   = $endDate.ToString('yyyy-MM-dd')
-	      }
-        $items = foreach ($item in @($plan)) { Convert-PlanItem $item }
-        Write-Json $res @{ok=$true; summary=$summary; items=$items }
-        continue
+        $script:previewInProgress = $true
+        try {
+          $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex
+          $days = ($endDate.Date - $startDate.Date).Days + 1
+	        # NOTE: PowerShell は 1件だけヒットすると配列ではなくスカラーになるため、@() で必ず配列化して .Count を安全に取る
+	        $summary = @{
+	          days  = $days
+	          total = @($plan).Count
+	          create = @($plan | Where-Object { $_.Action -eq 'Create' }).Count
+	          skip   = @($plan | Where-Object { $_.Action -eq 'Skip'   }).Count
+	          start = $startDate.ToString('yyyy-MM-dd')
+	          end   = $endDate.ToString('yyyy-MM-dd')
+	        }
+          $items = foreach ($item in @($plan)) { Convert-PlanItem $item }
+          Write-Json $res @{ok=$true; summary=$summary; items=$items }
+          continue
+        } finally {
+          $script:previewInProgress = $false
+        }
       } else {
-        $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -Confirm:$false
-        $items = foreach ($item in @($result)) { Convert-RunItem $item }
-	      Write-Json $res @{
-	        ok = $true
-	        created = @($result | Where-Object { $_.Result -match '^Created' }).Count
-	        skipped = @($result | Where-Object { $_.Result -match '^Skipped' }).Count
-	        items = $items
-	      }
-        continue
+        $script:runInProgress = $true
+        try {
+          $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -Confirm:$false
+          $items = foreach ($item in @($result)) { Convert-RunItem $item }
+	        Write-Json $res @{
+	          ok = $true
+	          created = @($result | Where-Object { $_.Result -match '^Created' }).Count
+	          skipped = @($result | Where-Object { $_.Result -match '^Skipped' }).Count
+	          items = $items
+	        }
+          continue
+        } finally {
+          $script:runInProgress = $false
+        }
       }
     }
     # static files
