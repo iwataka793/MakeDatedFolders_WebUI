@@ -5,6 +5,8 @@ const state = {
   previewSeq: 0,
   previewController: null,
   isPreviewing: false,
+  isRunning: false,
+  isBusyHold: false,
   isDirty: false
 };
 let _closeRequested = false;
@@ -90,10 +92,31 @@ function validatePayload(){
   return errors;
 }
 
+function updateButtons(){
+  const busy = state.isPreviewing || state.isRunning || state.isBusyHold;
+  $('btnPreview').disabled = busy;
+  $('btnRun').disabled = busy;
+  $('btnPreview').classList.toggle('ghost', state.isPreviewing || state.isBusyHold);
+  $('btnRun').classList.toggle('ghost', state.isRunning || state.isBusyHold);
+}
+
 function setPreviewBusy(busy){
   state.isPreviewing = busy;
-  $('btnPreview').disabled = busy;
-  $('btnPreview').classList.toggle('ghost', busy);
+  updateButtons();
+}
+
+function setRunBusy(busy){
+  state.isRunning = busy;
+  updateButtons();
+}
+
+function setBusyHold(ms){
+  state.isBusyHold = true;
+  updateButtons();
+  setTimeout(()=>{
+    state.isBusyHold = false;
+    updateButtons();
+  }, ms);
 }
 
 function markDirty(){
@@ -106,7 +129,12 @@ function markDirty(){
 async function api(path, body, opts = {}){
   const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json; charset=utf-8'}, body: JSON.stringify(body), signal: opts.signal });
   const j = await res.json().catch(()=>({ok:false, errors:['invalid json response']}));
-  if(!res.ok || !j.ok){ throw new Error((j.errors && j.errors[0]) || `HTTP ${res.status}`); }
+  if(!res.ok || !j.ok){
+    const err = new Error((j.errors && j.errors[0]) || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.busy = Boolean(j.busy);
+    throw err;
+  }
   return j;
 }
 
@@ -135,7 +163,7 @@ async function health(){
 }
 
 async function onPreview(){
-  if(state.isPreviewing){
+  if(state.isPreviewing || state.isRunning || state.isBusyHold){
     return;
   }
   const errors = validatePayload();
@@ -163,6 +191,11 @@ async function onPreview(){
     setStatus('プレビュー完了');
   } catch(e){
     if(seq !== state.previewSeq){ return; }
+    if(e.busy){
+      setStatus('処理中です。完了してから再度お試しください。');
+      setBusyHold(1500);
+      return;
+    }
     if(e.name === 'AbortError'){
       setStatus(timedOut ? 'プレビューがタイムアウトしました。' : 'プレビューをキャンセルしました。');
       return;
@@ -179,6 +212,10 @@ async function onPreview(){
 }
 
 async function onRun(){
+  if(state.isPreviewing || state.isRunning || state.isBusyHold){
+    return;
+  }
+  setRunBusy(true);
   setStatus('running...');
   try{
     const j = await api('/api/run', payload());
@@ -188,7 +225,14 @@ async function onRun(){
     updateSummary({ days: '-', total: created + skipped, create: created, skip: skipped });
     render(j.items);
   } catch(e){
+    if(e.busy){
+      setStatus('処理中です。完了してから再度お試しください。');
+      setBusyHold(1500);
+      return;
+    }
     setStatus('error: ' + e.message);
+  } finally {
+    setRunBusy(false);
   }
 }
 

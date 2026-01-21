@@ -87,6 +87,10 @@ function Convert-RunItem($item){
     FullPath   = $item.FullPath
   }
 }
+function Write-PerfLog([string]$Label, [hashtable]$Data){
+  $parts = foreach ($k in $Data.Keys) { ('{0}={1}' -f $k, $Data[$k]) }
+  Write-Host ('[Perf][{0}] {1}' -f $Label, ($parts -join ' '))
+}
 
 if ($Port -le 0) {
   $portsToTry = 8787..8797
@@ -270,12 +274,8 @@ while ($listener.IsListening) {
       }
     }
     if (($path -eq '/api/preview' -or $path -eq '/api/run') -and $req.HttpMethod -eq 'POST') {
-      if ($path -eq '/api/preview' -and $script:previewInProgress) {
-        Write-Json $res @{ ok = $false; errors = @('プレビューが実行中です。完了してから再度お試しください。') } 409
-        continue
-      }
-      if ($path -eq '/api/run' -and $script:runInProgress) {
-        Write-Json $res @{ ok = $false; errors = @('作成処理が実行中です。完了してから再度お試しください。') } 409
+      if ($script:previewInProgress -or $script:runInProgress) {
+        Write-Json $res @{ ok = $false; busy = $true; errors = @('処理中です。完了してから再度お試しください。') } 409
         continue
       }
       $bodyText = Read-RequestBody $req
@@ -296,7 +296,9 @@ while ($listener.IsListening) {
       if ($mode -eq 'Days' -and $daysToMake -lt 1) { $errors.Add('日数は1以上にしてください') }
       if ($endDate.Date -lt $startDate.Date) { $errors.Add('終了日は開始日以降にしてください') }
       if (-not (Test-Path -LiteralPath $basePath)) { $errors.Add(('作成先パスが存在しません: {0}' -f $basePath)) }
+      $perf = [System.Diagnostics.Stopwatch]::StartNew()
       $baseInfo = if ($basePath) { Get-BasePathInfo -BasePath $basePath } else { $null }
+      $baseInfoMs = $perf.ElapsedMilliseconds
       if ($baseInfo -and $baseInfo.Kind -eq 'Month') {
         if ($startDate.Year -ne $endDate.Year -or $startDate.Month -ne $endDate.Month) {
           $errors.Add('月フォルダを作成先にした場合は、同一月の範囲のみ対応しています。開始日と終了日を同じ月にしてください。')
@@ -306,7 +308,13 @@ while ($listener.IsListening) {
       if ($path -eq '/api/preview') {
         $script:previewInProgress = $true
         try {
-          $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex
+          $planPerf = $null
+          try {
+            $plan = Get-PlannedFolderList -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -PerfInfo ([ref]$planPerf)
+          } catch {
+            Write-Json $res @{ok=$false;errors=@($_.Exception.Message)} 400
+            continue
+          }
           $days = ($endDate.Date - $startDate.Date).Days + 1
 	        # NOTE: PowerShell は 1件だけヒットすると配列ではなくスカラーになるため、@() で必ず配列化して .Count を安全に取る
 	        $summary = @{
@@ -319,6 +327,15 @@ while ($listener.IsListening) {
 	        }
           $items = foreach ($item in @($plan)) { Convert-PlanItem $item }
           Write-Json $res @{ok=$true; summary=$summary; items=$items }
+          $perfData = [ordered]@{
+            kind         = if ($baseInfo) { $baseInfo.Kind } else { 'Unknown' }
+            baseInfoMs   = $baseInfoMs
+            resolveMs    = if ($planPerf) { $planPerf.ResolveYearMonthMs } else { 0 }
+            monthIndexMs = if ($planPerf) { $planPerf.MonthIndexMs } else { 0 }
+            planMs       = if ($planPerf) { $planPerf.TotalMs } else { 0 }
+            responseMs   = $perf.ElapsedMilliseconds
+          }
+          Write-PerfLog -Label 'preview' -Data $perfData
           continue
         } finally {
           $script:previewInProgress = $false
@@ -326,7 +343,13 @@ while ($listener.IsListening) {
       } else {
         $script:runInProgress = $true
         try {
-          $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -Confirm:$false
+          $runPerf = $null
+          try {
+            $result = New-DateIndexedFolders -BasePath $basePath -StartDate $startDate -EndDate $endDate -FoldersPerDay $foldersPerDay -FirstDayStartIndex $firstDayStartIndex -PerfInfo ([ref]$runPerf) -Confirm:$false
+          } catch {
+            Write-Json $res @{ok=$false;errors=@($_.Exception.Message)} 400
+            continue
+          }
           $items = foreach ($item in @($result)) { Convert-RunItem $item }
 	        Write-Json $res @{
 	          ok = $true
@@ -334,6 +357,15 @@ while ($listener.IsListening) {
 	          skipped = @($result | Where-Object { $_.Result -match '^Skipped' }).Count
 	          items = $items
 	        }
+          $perfData = [ordered]@{
+            kind         = if ($baseInfo) { $baseInfo.Kind } else { 'Unknown' }
+            baseInfoMs   = $baseInfoMs
+            resolveMs    = if ($runPerf) { $runPerf.ResolveYearMonthMs } else { 0 }
+            monthIndexMs = if ($runPerf) { $runPerf.MonthIndexMs } else { 0 }
+            planMs       = if ($runPerf) { $runPerf.TotalMs } else { 0 }
+            responseMs   = $perf.ElapsedMilliseconds
+          }
+          Write-PerfLog -Label 'run' -Data $perfData
           continue
         } finally {
           $script:runInProgress = $false
