@@ -135,6 +135,9 @@ async function health(){
 }
 
 async function onPreview(){
+  if(state.isPreviewing){
+    return;
+  }
   const errors = validatePayload();
   if(errors.length){
     setStatus('error: ' + errors[0]);

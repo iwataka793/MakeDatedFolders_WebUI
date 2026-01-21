@@ -451,6 +451,40 @@ function Get-ExistingIndicesForDate {
     return $indices
 }
 
+function Get-ExistingIndicesByMonth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$MonthPath
+    )
+
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $MonthPath)) {
+        return $result
+    }
+
+    try {
+        $names = Get-ChildItem -LiteralPath $MonthPath -Directory -Name -ErrorAction Stop
+        foreach ($n in $names) {
+            $nameNorm = Convert-ToHalfWidthDigits -Text $n
+            if ($nameNorm -match '^(?<date>\d{4})-(?<index>\d+)$') {
+                $dateKey = $Matches['date']
+                $index = $Matches['index'] -as [int]
+                if ($null -eq $index) { continue }
+                if (-not $result.ContainsKey($dateKey)) {
+                    $result[$dateKey] = New-Object 'System.Collections.Generic.HashSet[int]'
+                }
+                [void]$result[$dateKey].Add($index)
+            }
+        }
+    }
+    catch {
+        # ネットワークドライブ等の一時エラーでも落とさず空結果で返す
+        return @{}
+    }
+
+    return $result
+}
+
 function Get-DateRange {
     [CmdletBinding()]
     param(
@@ -498,6 +532,7 @@ function Get-PlannedFolderList {
     # 重複防止用
     $seenYear  = New-Object 'System.Collections.Generic.HashSet[string]'
     $seenMonth = New-Object 'System.Collections.Generic.HashSet[string]'
+    $monthIndexCache = @{}
 
     for ($dayOffset = 0; $dayOffset -lt $totalDays; $dayOffset++) {
         $date = $StartDate.Date.AddDays($dayOffset)
@@ -543,7 +578,11 @@ function Get-PlannedFolderList {
         # ★変更：フォルダ名の日付部分を MMdd に
         $dateStr = $date.ToString('MMdd')
 
-        $existingIndices = Get-ExistingIndicesForDate -BasePath $ym.MonthPath -DateString $dateStr
+        if (-not $monthIndexCache.ContainsKey($ym.MonthPath)) {
+            $monthIndexCache[$ym.MonthPath] = Get-ExistingIndicesByMonth -MonthPath $ym.MonthPath
+        }
+        $monthIndexMap = $monthIndexCache[$ym.MonthPath]
+        $existingIndices = if ($monthIndexMap.ContainsKey($dateStr)) { $monthIndexMap[$dateStr] } else { $null }
         if ($null -eq $existingIndices) {
             $existingIndices = New-Object 'System.Collections.Generic.HashSet[int]'
         }
